@@ -1,0 +1,8 @@
+{
+  "openclaw_path": "~/.openclaw",
+  "api_port": 8765,
+  "cors_origins": [
+    "http://localhost:3000",
+    "http://localhost:3001"
+  ]
+}
