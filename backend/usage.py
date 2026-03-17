@@ -381,6 +381,257 @@ def get_hourly_usage(hours: int = 24, today_only: bool = False) -> List[Dict]:
     return result
 
 
+def _parse_timestamp(ts: str) -> Optional[datetime]:
+    """解析时间戳，支持 ISO 格式和毫秒时间戳"""
+    if not ts:
+        return None
+    try:
+        if isinstance(ts, (int, float)) or ts.isdigit():
+            return datetime.utcfromtimestamp(int(ts) / 1000)
+        return datetime.fromisoformat(ts.replace('Z', '+00:00')).replace(tzinfo=None)
+    except:
+        return None
+
+
+def get_error_analysis(hours: int = 24, today_only: bool = False) -> Dict:
+    """获取错误分析数据：按模型、时段、Agent 维度拆分错误，
+    包含错误上下文（执行什么任务时出错）和工具调用成功率。
+
+    直接解析原始 JSONL 文件以获取完整上下文。
+    """
+    import re
+    from db import load_openclaw_config
+
+    now = datetime.utcnow()
+    if today_only:
+        cutoff_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        cutoff_time = now - timedelta(hours=hours)
+
+    try:
+        config_data = load_openclaw_config()
+        agents_list = config_data.get('agents', {}).get('list', [])
+        agent_ids = [a.get('id') for a in agents_list if a.get('id')]
+    except:
+        agent_ids = ['main', 'assistant', 'creative', 'researcher', 'developer']
+
+    # --- 统计容器 ---
+    errors_by_model = defaultdict(lambda: {'errors': 0, 'total': 0})
+    errors_by_hour = defaultdict(lambda: {'errors': 0, 'total': 0})
+    errors_by_agent = defaultdict(lambda: {'errors': 0, 'total': 0})
+    error_details = []
+
+    # 工具调用统计：按模型 -> 工具名 -> {success, fail}
+    tool_calls_by_model = defaultdict(lambda: defaultdict(lambda: {'success': 0, 'fail': 0}))
+    # 工具调用总计：按工具名
+    tool_calls_total = defaultdict(lambda: {'success': 0, 'fail': 0})
+
+    for agent_id in agent_ids:
+        session_dir = get_agent_session_dir(agent_id)
+        if not session_dir.exists():
+            continue
+
+        try:
+            files = list(session_dir.glob("*.jsonl"))
+            for file_path in files:
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        raw_lines = f.readlines()
+                except:
+                    continue
+
+                # 逐行解析，维护上下文状态
+                last_user_text = ''  # 最近的用户消息文本（任务上下文）
+                last_model = 'unknown'  # 最近使用的模型
+                # 收集 assistant 消息中的 toolCall id -> {name, model}
+                pending_tool_calls = {}
+
+                for raw_line in raw_lines:
+                    raw_line = raw_line.strip()
+                    if not raw_line:
+                        continue
+                    try:
+                        data = json.loads(raw_line)
+                    except:
+                        continue
+
+                    event_type = data.get('type', '')
+                    msg = data.get('message', {})
+                    role = msg.get('role', '')
+                    timestamp_raw = msg.get('timestamp', data.get('timestamp', ''))
+
+                    # --- 用户消息：提取任务上下文 ---
+                    if event_type == 'message' and role == 'user':
+                        content = msg.get('content', [])
+                        if isinstance(content, list):
+                            for c in content:
+                                if isinstance(c, dict) and c.get('type') == 'text':
+                                    last_user_text = c.get('text', '')[:300]
+                                    break
+                        elif isinstance(content, str):
+                            last_user_text = content[:300]
+                        continue
+
+                    # --- assistant 消息 ---
+                    if event_type == 'message' and role == 'assistant':
+                        model = msg.get('model', 'unknown')
+                        last_model = model
+                        stop_reason = msg.get('stopReason', '')
+                        usage = msg.get('usage', {})
+
+                        # 只统计有 usage 的消息（真正的 API 调用）
+                        if not usage:
+                            continue
+
+                        dt = _parse_timestamp(timestamp_raw)
+                        if not dt or dt < cutoff_time:
+                            continue
+
+                        hour_key = dt.strftime('%H:00')
+                        is_error = stop_reason == 'error'
+
+                        # 按维度累计
+                        errors_by_model[model]['total'] += 1
+                        errors_by_hour[hour_key]['total'] += 1
+                        errors_by_agent[agent_id]['total'] += 1
+                        if is_error:
+                            errors_by_model[model]['errors'] += 1
+                            errors_by_hour[hour_key]['errors'] += 1
+                            errors_by_agent[agent_id]['errors'] += 1
+
+                            # 提取错误上下文
+                            error_msg = msg.get('errorMessage', '')
+                            # 从 user 文本中提取任务名
+                            task_context = ''
+                            cron_match = re.search(r'\[cron:\S+\s+(\S+)\]', last_user_text)
+                            if cron_match:
+                                task_context = f'cron: {cron_match.group(1)}'
+                            elif last_user_text:
+                                task_context = last_user_text[:100]
+
+                            error_details.append({
+                                'timestamp': timestamp_raw if isinstance(timestamp_raw, str) else dt.isoformat() + 'Z',
+                                'hour': hour_key,
+                                'model': model,
+                                'agent_id': agent_id,
+                                'error_message': error_msg or '',
+                                'task_context': task_context,
+                            })
+
+                        # 收集 toolCall
+                        content = msg.get('content', [])
+                        if isinstance(content, list):
+                            for c in content:
+                                if isinstance(c, dict) and c.get('type') == 'toolCall':
+                                    tool_id = c.get('id', '')
+                                    tool_name = c.get('name', 'unknown')
+                                    if tool_id:
+                                        pending_tool_calls[tool_id] = {
+                                            'name': tool_name,
+                                            'model': model,
+                                        }
+                        continue
+
+                    # --- toolResult 消息 ---
+                    if event_type == 'message' and role == 'toolResult':
+                        dt = _parse_timestamp(timestamp_raw)
+                        if not dt or dt < cutoff_time:
+                            continue
+
+                        tool_call_id = msg.get('toolCallId', '')
+                        tool_name = msg.get('toolName', 'unknown')
+                        is_tool_error = msg.get('isError', False)
+
+                        # 匹配对应的 toolCall 获取模型信息
+                        tool_info = pending_tool_calls.pop(tool_call_id, None)
+                        model = tool_info['model'] if tool_info else last_model
+                        if tool_info:
+                            tool_name = tool_info.get('name', tool_name)
+
+                        if is_tool_error:
+                            tool_calls_by_model[model][tool_name]['fail'] += 1
+                            tool_calls_total[tool_name]['fail'] += 1
+                        else:
+                            tool_calls_by_model[model][tool_name]['success'] += 1
+                            tool_calls_total[tool_name]['success'] += 1
+                        continue
+
+        except Exception as e:
+            print(f"错误分析 - 处理 agent {agent_id} 出错: {e}")
+
+    # --- 计算错误率 ---
+    def add_rate(d):
+        result = {}
+        for key, val in d.items():
+            rate = (val['errors'] / val['total'] * 100) if val['total'] > 0 else 0
+            result[key] = {**val, 'rate': round(rate, 2)}
+        return result
+
+    # 按时间倒序，最多 50 条
+    error_details.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+    error_details = error_details[:50]
+
+    total_messages = sum(v['total'] for v in errors_by_model.values())
+    total_errors = sum(v['errors'] for v in errors_by_model.values())
+
+    # --- 组装工具调用成功率 ---
+    # 按模型汇总
+    tool_success_by_model = {}
+    for model, tools in tool_calls_by_model.items():
+        model_total = sum(t['success'] + t['fail'] for t in tools.values())
+        model_success = sum(t['success'] for t in tools.values())
+        model_fail = sum(t['fail'] for t in tools.values())
+        rate = round((model_success / model_total * 100) if model_total > 0 else 0, 2)
+
+        # 各工具明细
+        tools_detail = []
+        for tname, tstat in tools.items():
+            t_total = tstat['success'] + tstat['fail']
+            t_rate = round((tstat['success'] / t_total * 100) if t_total > 0 else 0, 2)
+            tools_detail.append({
+                'tool': tname,
+                'total': t_total,
+                'success': tstat['success'],
+                'fail': tstat['fail'],
+                'success_rate': t_rate,
+            })
+        tools_detail.sort(key=lambda x: x['fail'], reverse=True)
+
+        tool_success_by_model[model] = {
+            'total': model_total,
+            'success': model_success,
+            'fail': model_fail,
+            'success_rate': rate,
+            'tools': tools_detail,
+        }
+
+    # 工具总计排行
+    tool_success_ranking = []
+    for tname, tstat in tool_calls_total.items():
+        t_total = tstat['success'] + tstat['fail']
+        t_rate = round((tstat['success'] / t_total * 100) if t_total > 0 else 0, 2)
+        tool_success_ranking.append({
+            'tool': tname,
+            'total': t_total,
+            'success': tstat['success'],
+            'fail': tstat['fail'],
+            'success_rate': t_rate,
+        })
+    tool_success_ranking.sort(key=lambda x: x['total'], reverse=True)
+
+    return {
+        'total_messages': total_messages,
+        'total_errors': total_errors,
+        'overall_error_rate': round((total_errors / total_messages * 100) if total_messages > 0 else 0, 2),
+        'errors_by_model': add_rate(errors_by_model),
+        'errors_by_hour': add_rate(errors_by_hour),
+        'errors_by_agent': add_rate(errors_by_agent),
+        'error_details': error_details,
+        'tool_success_by_model': tool_success_by_model,
+        'tool_success_ranking': tool_success_ranking,
+    }
+
+
 if __name__ == '__main__':
     print("=== Agent Usage (Last 24 hours) ===")
     print(f"OpenCLAW Path: {OPENCLAW_PATH}")

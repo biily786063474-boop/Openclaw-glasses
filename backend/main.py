@@ -15,7 +15,7 @@ from db import (
     config
 )
 from providers import get_model_usage_summary, get_all_providers_usage
-from usage import get_all_agents_usage, get_total_usage, get_hourly_usage, get_cron_usage
+from usage import get_all_agents_usage, get_total_usage, get_hourly_usage, get_cron_usage, get_error_analysis
 
 app = FastAPI(title="OpenCLAW Traffic Monitor", version="1.0.0")
 
@@ -70,9 +70,23 @@ async def get_agents_usage():
 
 
 @app.get("/api/usage/cron")
-async def get_cron_usage_endpoint():
-    """获取定时任务使用量 - 今日数据"""
-    return get_cron_usage(hours=24, today_only=True)
+async def get_cron_usage_endpoint(range: str = "today"):
+    """获取定时任务使用量，支持 range 参数: today, 3d, 7d, 30d"""
+    if range == "today":
+        return get_cron_usage(hours=24, today_only=True)
+    hours_map = {"3d": 72, "7d": 168, "30d": 720}
+    hours = hours_map.get(range, 24)
+    return get_cron_usage(hours=hours, today_only=False)
+
+
+@app.get("/api/usage/errors")
+async def get_error_analysis_endpoint(range: str = "today"):
+    """获取错误分析数据，支持 range 参数: today, 3d, 7d, 30d"""
+    if range == "today":
+        return get_error_analysis(hours=24, today_only=True)
+    hours_map = {"3d": 72, "7d": 168, "30d": 720}
+    hours = hours_map.get(range, 24)
+    return get_error_analysis(hours=hours, today_only=False)
 
 
 @app.get("/api/providers")

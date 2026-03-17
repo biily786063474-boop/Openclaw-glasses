@@ -12,9 +12,12 @@ import {
   Save,
   BarChart2,
   AlertCircle,
+  AlertTriangle,
   Zap,
   Database,
-  Clock
+  Clock,
+  Copy,
+  Check
 } from 'lucide-react'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts'
 
@@ -42,6 +45,15 @@ function Sidebar({ currentPage, setCurrentPage }) {
           >
             <BarChart2 />
             <span>Token用量分析</span>
+          </button>
+        </li>
+        <li className="nav-item">
+          <button
+            className={`nav-link ${currentPage === 'errors' ? 'active' : ''}`}
+            onClick={() => setCurrentPage('errors')}
+          >
+            <AlertTriangle />
+            <span>错误分析</span>
           </button>
         </li>
         <li className="nav-item">
@@ -964,16 +976,636 @@ function TokenUsagePage() {
   )
 }
 
+// ========== Error Analysis Page ==========
+function ErrorAnalysisPage() {
+  const [data, setData] = useState(null)
+  const [agents, setAgents] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+  const [lastUpdated, setLastUpdated] = useState(null)
+  const [expandedModel, setExpandedModel] = useState(null)
+  const [expandedErrors, setExpandedErrors] = useState({})
+  const [copiedIdx, setCopiedIdx] = useState(null)
+  const [timeRange, setTimeRange] = useState('today')
+
+  const toggleError = (idx) => {
+    setExpandedErrors(prev => ({ ...prev, [idx]: !prev[idx] }))
+  }
+
+  const copyError = async (err, idx) => {
+    const agent = agents.find(a => a.id === err.agent_id) || {}
+    const text = [
+      `Agent: ${agent.name || err.agent_id}`,
+      `Model: ${err.model}`,
+      `Time: ${err.timestamp}`,
+      err.task_context ? `Task: ${err.task_context}` : '',
+      err.error_message ? `Error: ${err.error_message}` : '',
+    ].filter(Boolean).join('\n')
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopiedIdx(idx)
+      setTimeout(() => setCopiedIdx(null), 2000)
+    } catch {}
+  }
+
+  const handleRangeChange = (r) => {
+    setTimeRange(r)
+    setLoading(true)
+    setExpandedErrors({})
+    fetchData(r)
+  }
+
+  const fetchData = async (range) => {
+    const r = range || timeRange
+    try {
+      const [errRes, agentsRes] = await Promise.all([
+        fetch(`${API_BASE}/api/usage/errors?range=${r}`),
+        fetch(`${API_BASE}/api/agents`)
+      ])
+
+      if (!errRes.ok) throw new Error('Failed to fetch error data')
+
+      const errData = await errRes.json()
+      const agentsData = await agentsRes.json()
+
+      setData(errData)
+      setAgents(agentsData.agents || [])
+      setLastUpdated(new Date())
+      setError(null)
+    } catch (err) {
+      setError(err.message || '无法获取错误分析数据')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    fetchData()
+  }, [])
+
+  const formatNumber = (num) => {
+    if (!num && num !== 0) return '-'
+    if (num >= 1000000) return (num / 1000000).toFixed(2) + 'M'
+    if (num >= 1000) return (num / 1000).toFixed(1) + 'K'
+    return num?.toLocaleString() || '0'
+  }
+
+  if (loading) {
+    return (
+      <div className="loading-container">
+        <div className="loading-spinner"></div>
+        <div className="loading-text">加载中...</div>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="error-container">
+        <AlertCircle className="error-icon" />
+        <div className="error-message">{error}</div>
+      </div>
+    )
+  }
+
+  // 按模型错误率数据
+  const modelErrorData = Object.entries(data?.errors_by_model || {})
+    .map(([model, info]) => ({
+      name: model,
+      errors: info.errors,
+      total: info.total,
+      rate: info.rate
+    }))
+    .sort((a, b) => b.errors - a.errors)
+
+  // 按小时错误数据（补全 24 小时）
+  const hourlyErrorData = []
+  for (let i = 0; i < 24; i++) {
+    const hourKey = `${String(i).padStart(2, '0')}:00`
+    const info = data?.errors_by_hour?.[hourKey] || { errors: 0, total: 0, rate: 0 }
+    hourlyErrorData.push({
+      hour: hourKey,
+      errors: info.errors,
+      total: info.total,
+      rate: info.rate
+    })
+  }
+
+  // 按 Agent 错误数据
+  const agentErrorData = Object.entries(data?.errors_by_agent || {})
+    .map(([agentId, info]) => {
+      const agent = agents.find(a => a.id === agentId) || {}
+      return {
+        name: agent.emoji ? `${agent.emoji} ${agent.name}` : agentId,
+        errors: info.errors,
+        total: info.total,
+        rate: info.rate
+      }
+    })
+    .sort((a, b) => b.errors - a.errors)
+
+  // 找出错误最多的模型和时段
+  const topErrorModel = modelErrorData.length > 0 ? modelErrorData[0] : null
+  const topErrorHour = hourlyErrorData.reduce((max, h) => h.errors > max.errors ? h : max, { errors: 0, hour: '-' })
+
+  // 工具调用成功率数据
+  const toolByModel = data?.tool_success_by_model || {}
+  const toolRanking = data?.tool_success_ranking || []
+
+  // 工具成功率图表数据（按模型）
+  const toolModelChartData = Object.entries(toolByModel)
+    .map(([model, info]) => ({
+      name: model,
+      success_rate: info.success_rate,
+      total: info.total,
+      fail: info.fail,
+    }))
+    .sort((a, b) => a.success_rate - b.success_rate)
+
+  const thStyle = { padding: '12px 8px', textAlign: 'left', fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-display)', letterSpacing: 1 }
+  const thStyleRight = { ...thStyle, textAlign: 'right' }
+
+  return (
+    <div>
+      {/* Header */}
+      <header className="header">
+        <div className="header-title">
+          <h1>错误分析</h1>
+          <span className="header-badge">{TIME_RANGES.find(r => r.key === timeRange)?.label || '今日'}数据</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          <TimeRangePicker value={timeRange} onChange={handleRangeChange} />
+          <span className="last-updated">
+            更新: {lastUpdated?.toLocaleTimeString('zh-CN') || 'N/A'}
+          </span>
+          <button className="refresh-btn" onClick={() => fetchData()}>
+            <RefreshCw size={16} />
+            刷新
+          </button>
+        </div>
+      </header>
+
+      {/* Summary Cards */}
+      <section className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)', marginBottom: 40 }}>
+        <div className="glass-card stat-card">
+          <div className="stat-icon" style={{ background: 'linear-gradient(135deg, rgba(239, 68, 68, 0.15), rgba(239, 68, 68, 0.05))' }}>
+            <AlertTriangle size={26} />
+          </div>
+          <div className="stat-info">
+            <h3>{data?.total_errors || 0}</h3>
+            <p>总错误数</p>
+          </div>
+        </div>
+
+        <div className="glass-card stat-card">
+          <div className="stat-icon messages">
+            <Activity size={26} />
+          </div>
+          <div className="stat-info">
+            <h3>{data?.overall_error_rate || 0}%</h3>
+            <p>总体错误率</p>
+          </div>
+        </div>
+
+        <div className="glass-card stat-card">
+          <div className="stat-icon" style={{ background: 'linear-gradient(135deg, rgba(236, 72, 153, 0.15), rgba(236, 72, 153, 0.05))' }}>
+            <Cpu size={26} />
+          </div>
+          <div className="stat-info">
+            <h3 style={{ fontSize: topErrorModel?.name?.length > 15 ? 16 : 24 }}>
+              {topErrorModel ? topErrorModel.name : '-'}
+            </h3>
+            <p>错误最多的模型</p>
+          </div>
+          {topErrorModel && (
+            <div className="stat-tooltip">
+              <div className="stat-tooltip-title">模型错误详情</div>
+              <div className="stat-tooltip-item">
+                <span className="stat-tooltip-name">错误次数</span>
+                <span className="stat-tooltip-value">{topErrorModel.errors}</span>
+              </div>
+              <div className="stat-tooltip-item">
+                <span className="stat-tooltip-name">总请求数</span>
+                <span className="stat-tooltip-value">{topErrorModel.total}</span>
+              </div>
+              <div className="stat-tooltip-item">
+                <span className="stat-tooltip-name">错误率</span>
+                <span className="stat-tooltip-value">{topErrorModel.rate}%</span>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="glass-card stat-card">
+          <div className="stat-icon" style={{ background: 'linear-gradient(135deg, rgba(6, 182, 212, 0.15), rgba(6, 182, 212, 0.05))' }}>
+            <Clock size={26} />
+          </div>
+          <div className="stat-info">
+            <h3>{topErrorHour.errors > 0 ? topErrorHour.hour : '-'}</h3>
+            <p>错误高峰时段</p>
+          </div>
+          {topErrorHour.errors > 0 && (
+            <div className="stat-tooltip">
+              <div className="stat-tooltip-title">高峰时段详情</div>
+              <div className="stat-tooltip-item">
+                <span className="stat-tooltip-name">错误次数</span>
+                <span className="stat-tooltip-value">{topErrorHour.errors}</span>
+              </div>
+              <div className="stat-tooltip-item">
+                <span className="stat-tooltip-name">总请求数</span>
+                <span className="stat-tooltip-value">{topErrorHour.total}</span>
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* Charts Row 1: 分时段 + 模型错误率 */}
+      <section style={{ marginBottom: 40 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
+          {/* 分时段错误分布 */}
+          <div className="glass-card">
+            <h3 style={{ fontFamily: 'var(--font-display)', fontSize: 16, marginBottom: 20, color: 'var(--text-primary)' }}>
+              分时段错误分布
+            </h3>
+            <ResponsiveContainer width="100%" height={240}>
+              <BarChart data={hourlyErrorData}>
+                <XAxis dataKey="hour" tick={{ fill: 'var(--text-muted)', fontSize: 10 }} axisLine={{ stroke: 'var(--border)' }} tickLine={false} interval={3} />
+                <YAxis tick={{ fill: 'var(--text-muted)', fontSize: 10 }} axisLine={{ stroke: 'var(--border)' }} tickLine={false} allowDecimals={false} />
+                <Tooltip
+                  contentStyle={{ background: 'var(--bg-dark)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }}
+                  formatter={(value, name) => {
+                    if (name === 'errors') return [value, '错误数']
+                    if (name === 'total') return [value, '总请求']
+                    return [value, name]
+                  }}
+                />
+                <Bar dataKey="total" fill="rgba(99, 102, 241, 0.3)" radius={[4, 4, 0, 0]} name="total" />
+                <Bar dataKey="errors" fill="#ef4444" radius={[4, 4, 0, 0]} name="errors" />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+
+          {/* 各模型错误率对比 */}
+          <div className="glass-card">
+            <h3 style={{ fontFamily: 'var(--font-display)', fontSize: 16, marginBottom: 20, color: 'var(--text-primary)' }}>
+              各模型错误率对比
+            </h3>
+            {modelErrorData.length > 0 ? (
+              <ResponsiveContainer width="100%" height={240}>
+                <BarChart data={modelErrorData} layout="vertical">
+                  <XAxis type="number" tick={{ fill: 'var(--text-muted)', fontSize: 10 }} axisLine={{ stroke: 'var(--border)' }} tickLine={false} unit="%" />
+                  <YAxis type="category" dataKey="name" tick={{ fill: 'var(--text-secondary)', fontSize: 11 }} axisLine={{ stroke: 'var(--border)' }} tickLine={false} width={120} />
+                  <Tooltip
+                    contentStyle={{ background: 'var(--bg-dark)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }}
+                    formatter={(value, name) => name === 'rate' ? [`${value}%`, '错误率'] : [value, name]}
+                  />
+                  <Bar dataKey="rate" fill="#ef4444" radius={[0, 4, 4, 0]} name="rate">
+                    {modelErrorData.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={entry.rate > 5 ? '#ef4444' : entry.rate > 1 ? '#eab308' : '#22c55e'} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div style={{ height: 240, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)' }}>
+                暂无模型错误数据
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* Tool Call Success Rate Section */}
+      <section style={{ marginBottom: 40 }}>
+        <h2 className="section-title">
+          <Zap size={20} />
+          工具调用成功率
+        </h2>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
+          {/* 各模型工具调用成功率图表 */}
+          <div className="glass-card">
+            <h3 style={{ fontFamily: 'var(--font-display)', fontSize: 16, marginBottom: 20, color: 'var(--text-primary)' }}>
+              各模型工具调用成功率
+            </h3>
+            {toolModelChartData.length > 0 ? (
+              <ResponsiveContainer width="100%" height={Math.max(200, toolModelChartData.length * 50)}>
+                <BarChart data={toolModelChartData} layout="vertical">
+                  <XAxis type="number" domain={[0, 100]} tick={{ fill: 'var(--text-muted)', fontSize: 10 }} axisLine={{ stroke: 'var(--border)' }} tickLine={false} unit="%" />
+                  <YAxis type="category" dataKey="name" tick={{ fill: 'var(--text-secondary)', fontSize: 11 }} axisLine={{ stroke: 'var(--border)' }} tickLine={false} width={120} />
+                  <Tooltip
+                    contentStyle={{ background: 'var(--bg-dark)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }}
+                    formatter={(value, name, props) => {
+                      const item = props.payload
+                      return [`${value}% (${item.total} 次调用, ${item.fail} 次失败)`, '成功率']
+                    }}
+                  />
+                  <Bar dataKey="success_rate" radius={[0, 4, 4, 0]} name="success_rate">
+                    {toolModelChartData.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={entry.success_rate >= 99 ? '#22c55e' : entry.success_rate >= 95 ? '#eab308' : '#ef4444'} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div style={{ height: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)' }}>
+                暂无工具调用数据
+              </div>
+            )}
+          </div>
+
+          {/* 工具调用排行 */}
+          <div className="glass-card">
+            <h3 style={{ fontFamily: 'var(--font-display)', fontSize: 16, marginBottom: 20, color: 'var(--text-primary)' }}>
+              工具调用排行
+            </h3>
+            {toolRanking.length > 0 ? (
+              <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                      <th style={thStyle}>工具</th>
+                      <th style={thStyleRight}>调用</th>
+                      <th style={thStyleRight}>失败</th>
+                      <th style={thStyleRight}>成功率</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {toolRanking.map((tool, idx) => (
+                      <tr key={idx} style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '10px 8px', fontSize: 13, color: 'var(--text-primary)', fontFamily: 'monospace' }}>{tool.tool}</td>
+                        <td style={{ padding: '10px 8px', textAlign: 'right', fontSize: 13, color: 'var(--text-secondary)', fontFamily: 'var(--font-display)' }}>{tool.total}</td>
+                        <td style={{ padding: '10px 8px', textAlign: 'right', fontSize: 13, color: tool.fail > 0 ? '#ef4444' : 'var(--text-secondary)', fontFamily: 'var(--font-display)' }}>{tool.fail}</td>
+                        <td style={{ padding: '10px 8px', textAlign: 'right' }}>
+                          <span style={{
+                            fontSize: 12, padding: '4px 10px', borderRadius: 12, fontFamily: 'var(--font-display)',
+                            background: tool.success_rate >= 99 ? 'rgba(34, 197, 94, 0.15)' : tool.success_rate >= 95 ? 'rgba(234, 179, 8, 0.15)' : 'rgba(239, 68, 68, 0.15)',
+                            color: tool.success_rate >= 99 ? '#22c55e' : tool.success_rate >= 95 ? '#eab308' : '#ef4444',
+                            border: `1px solid ${tool.success_rate >= 99 ? 'rgba(34, 197, 94, 0.3)' : tool.success_rate >= 95 ? 'rgba(234, 179, 8, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`
+                          }}>
+                            {tool.success_rate}%
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-muted)' }}>暂无工具调用数据</div>
+            )}
+          </div>
+        </div>
+
+        {/* 各模型工具明细（可展开） */}
+        {Object.keys(toolByModel).length > 0 && (
+          <div style={{ marginTop: 24 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(400px, 1fr))', gap: 16 }}>
+              {Object.entries(toolByModel).map(([model, info]) => (
+                <div key={model} className="glass-card" style={{ padding: 20, cursor: 'pointer' }}
+                  onClick={() => setExpandedModel(expandedModel === model ? null : model)}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: expandedModel === model ? 16 : 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                      <Cpu size={18} color="var(--primary-light)" />
+                      <span style={{ fontFamily: 'var(--font-display)', fontSize: 14, fontWeight: 600 }}>{model}</span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                      <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                        {info.total} 次调用
+                      </span>
+                      <span style={{
+                        fontSize: 12, padding: '4px 10px', borderRadius: 12, fontFamily: 'var(--font-display)',
+                        background: info.success_rate >= 99 ? 'rgba(34, 197, 94, 0.15)' : 'rgba(234, 179, 8, 0.15)',
+                        color: info.success_rate >= 99 ? '#22c55e' : '#eab308',
+                      }}>
+                        {info.success_rate}%
+                      </span>
+                      {expandedModel === model ? <ChevronDown size={16} color="var(--text-muted)" /> : <ChevronRight size={16} color="var(--text-muted)" />}
+                    </div>
+                  </div>
+                  {expandedModel === model && info.tools.length > 0 && (
+                    <div style={{ borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+                      {info.tools.map((tool, idx) => (
+                        <div key={idx} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 0', borderBottom: idx < info.tools.length - 1 ? '1px solid var(--border)' : 'none' }}>
+                          <span style={{ fontSize: 13, fontFamily: 'monospace', color: 'var(--text-primary)' }}>{tool.tool}</span>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+                            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{tool.total} 次</span>
+                            {tool.fail > 0 && <span style={{ fontSize: 12, color: '#ef4444' }}>{tool.fail} 失败</span>}
+                            <span style={{ fontSize: 12, fontFamily: 'var(--font-display)', color: tool.success_rate >= 99 ? '#22c55e' : tool.success_rate >= 95 ? '#eab308' : '#ef4444' }}>
+                              {tool.success_rate}%
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* Agent Error Table + Recent Errors (with context) */}
+      <section style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
+        {/* 各 Agent 错误统计 */}
+        <div className="glass-card">
+          <h3 style={{ fontFamily: 'var(--font-display)', fontSize: 16, marginBottom: 20, color: 'var(--text-primary)' }}>
+            各 Agent 错误统计
+          </h3>
+          {agentErrorData.length > 0 ? (
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                    <th style={thStyle}>Agent</th>
+                    <th style={thStyleRight}>错误</th>
+                    <th style={thStyleRight}>总请求</th>
+                    <th style={thStyleRight}>错误率</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {agentErrorData.map((agent, idx) => (
+                    <tr key={idx} style={{ borderBottom: '1px solid var(--border)' }}>
+                      <td style={{ padding: '12px 8px', fontSize: 14, color: 'var(--text-primary)' }}>{agent.name}</td>
+                      <td style={{ padding: '12px 8px', textAlign: 'right', fontSize: 14, color: agent.errors > 0 ? '#ef4444' : 'var(--text-secondary)', fontFamily: 'var(--font-display)' }}>{agent.errors}</td>
+                      <td style={{ padding: '12px 8px', textAlign: 'right', fontSize: 14, color: 'var(--text-secondary)', fontFamily: 'var(--font-display)' }}>{agent.total}</td>
+                      <td style={{ padding: '12px 8px', textAlign: 'right' }}>
+                        <span style={{
+                          fontSize: 12, padding: '4px 10px', borderRadius: 12, fontFamily: 'var(--font-display)',
+                          background: agent.rate > 5 ? 'rgba(239, 68, 68, 0.15)' : agent.rate > 1 ? 'rgba(234, 179, 8, 0.15)' : 'rgba(34, 197, 94, 0.15)',
+                          color: agent.rate > 5 ? '#ef4444' : agent.rate > 1 ? '#eab308' : '#22c55e',
+                          border: `1px solid ${agent.rate > 5 ? 'rgba(239, 68, 68, 0.3)' : agent.rate > 1 ? 'rgba(234, 179, 8, 0.3)' : 'rgba(34, 197, 94, 0.3)'}`
+                        }}>
+                          {agent.rate}%
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-muted)' }}>
+              暂无 Agent 错误数据
+            </div>
+          )}
+        </div>
+
+        {/* 最近错误事件（含任务上下文、展开/收起、一键复制） */}
+        <div className="glass-card">
+          <h3 style={{ fontFamily: 'var(--font-display)', fontSize: 16, marginBottom: 20, color: 'var(--text-primary)' }}>
+            最近错误事件
+          </h3>
+          {data?.error_details?.length > 0 ? (
+            <div style={{ maxHeight: 500, overflowY: 'auto' }}>
+              {data.error_details.map((err, idx) => {
+                const agent = agents.find(a => a.id === err.agent_id) || {}
+                const time = new Date(err.timestamp).toLocaleTimeString('zh-CN')
+                const isExpanded = expandedErrors[idx]
+                const hasDetail = err.error_message || err.task_context
+                return (
+                  <div key={idx} style={{
+                    padding: '14px 0',
+                    borderBottom: '1px solid var(--border)'
+                  }}>
+                    {/* Header row */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: hasDetail ? 'pointer' : 'default' }}
+                      onClick={() => hasDetail && toggleError(idx)}>
+                      <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#ef4444', flexShrink: 0 }} />
+                      <span style={{ fontSize: 13, color: 'var(--text-primary)', fontWeight: 500 }}>
+                        {agent.emoji || ''} {agent.name || err.agent_id}
+                      </span>
+                      <span style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-display)' }}>
+                        {err.model}
+                      </span>
+                      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-display)' }}>
+                          {time}
+                        </span>
+                        {hasDetail && (
+                          isExpanded ? <ChevronDown size={14} color="var(--text-muted)" /> : <ChevronRight size={14} color="var(--text-muted)" />
+                        )}
+                      </div>
+                    </div>
+                    {/* Summary line (always visible) */}
+                    {err.error_message && !isExpanded && (
+                      <div style={{
+                        fontSize: 11, color: '#ef4444', marginLeft: 18, marginTop: 4,
+                        fontFamily: 'monospace', opacity: 0.7,
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '100%'
+                      }}>
+                        {err.error_message.length > 80 ? err.error_message.slice(0, 80) + '...' : err.error_message}
+                      </div>
+                    )}
+                    {/* Expanded detail */}
+                    {isExpanded && (
+                      <div style={{ marginLeft: 18, marginTop: 10, position: 'relative' }}>
+                        {/* Copy button */}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); copyError(err, idx) }}
+                          style={{
+                            position: 'absolute', top: 0, right: 0,
+                            background: copiedIdx === idx ? 'rgba(34, 197, 94, 0.15)' : 'rgba(255,255,255,0.05)',
+                            border: `1px solid ${copiedIdx === idx ? 'rgba(34, 197, 94, 0.3)' : 'var(--border)'}`,
+                            borderRadius: 8, padding: '6px 12px', cursor: 'pointer',
+                            display: 'flex', alignItems: 'center', gap: 6,
+                            fontSize: 12, fontFamily: 'var(--font-display)',
+                            color: copiedIdx === idx ? '#22c55e' : 'var(--text-muted)',
+                            transition: 'all 0.2s'
+                          }}
+                        >
+                          {copiedIdx === idx ? <Check size={12} /> : <Copy size={12} />}
+                          {copiedIdx === idx ? 'Copied' : 'Copy'}
+                        </button>
+                        {/* Task context */}
+                        {err.task_context && (
+                          <div style={{ marginBottom: 8 }}>
+                            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4, fontFamily: 'var(--font-display)', letterSpacing: 0.5 }}>TASK</div>
+                            <div style={{
+                              fontSize: 12, color: 'var(--primary-light)',
+                              padding: '8px 12px', background: 'rgba(99, 102, 241, 0.08)', borderRadius: 8,
+                              lineHeight: 1.5, wordBreak: 'break-all', whiteSpace: 'pre-wrap', maxWidth: 'calc(100% - 90px)'
+                            }}>
+                              {err.task_context}
+                            </div>
+                          </div>
+                        )}
+                        {/* Full error message */}
+                        {err.error_message && (
+                          <div>
+                            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4, fontFamily: 'var(--font-display)', letterSpacing: 0.5 }}>ERROR</div>
+                            <div style={{
+                              fontSize: 12, color: '#ef4444',
+                              fontFamily: 'monospace', lineHeight: 1.6,
+                              padding: '10px 14px', background: 'rgba(239, 68, 68, 0.06)', borderRadius: 8,
+                              border: '1px solid rgba(239, 68, 68, 0.12)',
+                              wordBreak: 'break-all', whiteSpace: 'pre-wrap', maxWidth: 'calc(100% - 90px)',
+                              maxHeight: 200, overflowY: 'auto'
+                            }}>
+                              {err.error_message}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          ) : (
+            <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-muted)' }}>
+              暂无错误记录
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  )
+}
+
+// ========== Time Range Picker ==========
+const TIME_RANGES = [
+  { key: 'today', label: '今日' },
+  { key: '3d', label: '3天' },
+  { key: '7d', label: '7天' },
+  { key: '30d', label: '30天' },
+]
+
+function TimeRangePicker({ value, onChange }) {
+  return (
+    <div style={{ display: 'flex', gap: 4, background: 'rgba(255,255,255,0.03)', borderRadius: 10, padding: 3, border: '1px solid var(--border)' }}>
+      {TIME_RANGES.map(r => (
+        <button
+          key={r.key}
+          onClick={() => onChange(r.key)}
+          style={{
+            padding: '6px 14px', borderRadius: 8, border: 'none', cursor: 'pointer',
+            fontSize: 12, fontFamily: 'var(--font-display)', letterSpacing: 0.5, transition: 'all 0.2s',
+            background: value === r.key ? 'linear-gradient(135deg, rgba(99, 102, 241, 0.25), rgba(236, 72, 153, 0.15))' : 'transparent',
+            color: value === r.key ? 'var(--primary-light)' : 'var(--text-muted)',
+            borderBottom: value === r.key ? '2px solid var(--primary)' : '2px solid transparent',
+          }}
+        >
+          {r.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 // ========== Cron Jobs Page ==========
 function CronJobsPage() {
   const [cronData, setCronData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [lastUpdated, setLastUpdated] = useState(null)
+  const [timeRange, setTimeRange] = useState('today')
 
-  const fetchData = async () => {
+  const fetchData = async (range) => {
+    const r = range || timeRange
     try {
-      const cronRes = await fetch(`${API_BASE}/api/usage/cron`)
+      const cronRes = await fetch(`${API_BASE}/api/usage/cron?range=${r}`)
 
       if (!cronRes.ok) {
         throw new Error('Failed to fetch cron data')
@@ -990,6 +1622,12 @@ function CronJobsPage() {
     }
   }
 
+  const handleRangeChange = (r) => {
+    setTimeRange(r)
+    setLoading(true)
+    fetchData(r)
+  }
+
   useEffect(() => {
     fetchData()
   }, [])
@@ -1000,6 +1638,8 @@ function CronJobsPage() {
     if (num >= 1000) return (num / 1000).toFixed(1) + 'K'
     return num?.toLocaleString() || '0'
   }
+
+  const rangeLabel = TIME_RANGES.find(r => r.key === timeRange)?.label || '今日'
 
   // 处理 cron 数据
   const cronList = cronData?.by_cron ? Object.entries(cronData.by_cron).map(([name, data]) => ({
@@ -1034,13 +1674,14 @@ function CronJobsPage() {
       <header className="header">
         <div className="header-title">
           <h1>定时任务</h1>
-          <span className="header-badge">当日数据</span>
+          <span className="header-badge">{rangeLabel}数据</span>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          <TimeRangePicker value={timeRange} onChange={handleRangeChange} />
           <span className="last-updated">
             更新: {lastUpdated?.toLocaleTimeString('zh-CN') || 'N/A'}
           </span>
-          <button className="refresh-btn" onClick={fetchData}>
+          <button className="refresh-btn" onClick={() => fetchData()}>
             <RefreshCw size={16} />
             刷新
           </button>
@@ -1048,7 +1689,7 @@ function CronJobsPage() {
       </header>
 
       {/* Summary Cards */}
-      <section className="stats-grid" style={{ marginBottom: 40 }}>
+      <section className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)', marginBottom: 40 }}>
         <div className="glass-card stat-card">
           <div className="stat-icon messages">
             <Clock size={26} />
@@ -1090,39 +1731,79 @@ function CronJobsPage() {
         </div>
       </section>
 
-      {/* Cron List */}
+      {/* Cron Table */}
       <section>
         <h2 className="section-title">
           <Clock size={20} />
           任务详情
         </h2>
-        <div className="agents-grid">
-          {cronList.map((cron) => (
-            <div key={cron.name} className="glass-card agent-card">
-              <div className="agent-header">
-                <span className="agent-name">
-                  <Clock size={18} />
-                  {cron.name}
-                </span>
-              </div>
-              <div className="agent-stats">
-                <div className="agent-stat">
-                  <div className="agent-stat-value">{cron.count}</div>
-                  <div className="agent-stat-label">执行次数</div>
-                </div>
-                <div className="agent-stat">
-                  <div className="agent-stat-value">{formatNumber(cron.tokens)}</div>
-                  <div className="agent-stat-label">Token</div>
-                </div>
-              </div>
-            </div>
-          ))}
-          {cronList.length === 0 && (
-            <div className="glass-card" style={{ gridColumn: '1 / -1', textAlign: 'center', padding: '40px' }}>
-              <p style={{ color: 'var(--text-muted)' }}>暂无定时任务数据</p>
-            </div>
-          )}
-        </div>
+        {cronList.length > 0 ? (
+          <div className="glass-card">
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                  <th style={{ padding: '14px 12px', textAlign: 'left', fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-display)', letterSpacing: 1 }}>任务名称</th>
+                  <th style={{ padding: '14px 12px', textAlign: 'right', fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-display)', letterSpacing: 1 }}>执行次数</th>
+                  <th style={{ padding: '14px 12px', textAlign: 'right', fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-display)', letterSpacing: 1 }}>INPUT</th>
+                  <th style={{ padding: '14px 12px', textAlign: 'right', fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-display)', letterSpacing: 1 }}>OUTPUT</th>
+                  <th style={{ padding: '14px 12px', textAlign: 'right', fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-display)', letterSpacing: 1 }}>TOTAL TOKEN</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cronList.map((cron, idx) => (
+                  <tr key={cron.name} style={{ borderBottom: idx < cronList.length - 1 ? '1px solid var(--border)' : 'none' }}>
+                    <td style={{ padding: '14px 12px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <Clock size={16} color="var(--primary-light)" />
+                        <span style={{ fontSize: 14, color: 'var(--text-primary)', fontWeight: 500 }}>{cron.name}</span>
+                      </div>
+                    </td>
+                    <td style={{ padding: '14px 12px', textAlign: 'right', fontFamily: 'var(--font-display)', fontSize: 16, fontWeight: 700, color: 'var(--text-primary)' }}>
+                      {cron.count}
+                    </td>
+                    <td style={{ padding: '14px 12px', textAlign: 'right', fontFamily: 'var(--font-display)', fontSize: 14, color: 'var(--text-secondary)' }}>
+                      {formatNumber(cron.input)}
+                    </td>
+                    <td style={{ padding: '14px 12px', textAlign: 'right', fontFamily: 'var(--font-display)', fontSize: 14, color: 'var(--text-secondary)' }}>
+                      {formatNumber(cron.output)}
+                    </td>
+                    <td style={{ padding: '14px 12px', textAlign: 'right' }}>
+                      <span style={{
+                        fontFamily: 'var(--font-display)', fontSize: 14, fontWeight: 600,
+                        color: cron.tokens > 50000 ? '#ec4899' : cron.tokens > 10000 ? '#eab308' : 'var(--text-primary)'
+                      }}>
+                        {formatNumber(cron.tokens)}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr style={{ borderTop: '2px solid var(--border)' }}>
+                  <td style={{ padding: '14px 12px', fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
+                    合计 ({cronList.length} 个任务)
+                  </td>
+                  <td style={{ padding: '14px 12px', textAlign: 'right', fontFamily: 'var(--font-display)', fontSize: 16, fontWeight: 700, color: 'var(--primary-light)' }}>
+                    {cronData?.messages || 0}
+                  </td>
+                  <td style={{ padding: '14px 12px', textAlign: 'right', fontFamily: 'var(--font-display)', fontSize: 14, color: 'var(--primary-light)' }}>
+                    {formatNumber(cronData?.input_tokens || 0)}
+                  </td>
+                  <td style={{ padding: '14px 12px', textAlign: 'right', fontFamily: 'var(--font-display)', fontSize: 14, color: 'var(--primary-light)' }}>
+                    {formatNumber(cronData?.output_tokens || 0)}
+                  </td>
+                  <td style={{ padding: '14px 12px', textAlign: 'right', fontFamily: 'var(--font-display)', fontSize: 14, fontWeight: 600, color: 'var(--primary-light)' }}>
+                    {formatNumber(cronData?.total_tokens || 0)}
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        ) : (
+          <div className="glass-card" style={{ textAlign: 'center', padding: '40px' }}>
+            <p style={{ color: 'var(--text-muted)' }}>暂无定时任务数据</p>
+          </div>
+        )}
       </section>
     </div>
   )
@@ -1138,6 +1819,7 @@ function App() {
       <main className="main-content">
         {currentPage === 'traffic' && <TrafficPage />}
         {currentPage === 'token' && <TokenUsagePage />}
+        {currentPage === 'errors' && <ErrorAnalysisPage />}
         {currentPage === 'cron' && <CronJobsPage />}
         {currentPage === 'files' && <FilesPage />}
       </main>
