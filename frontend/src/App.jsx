@@ -987,6 +987,7 @@ function ErrorAnalysisPage() {
   const [expandedErrors, setExpandedErrors] = useState({})
   const [copiedIdx, setCopiedIdx] = useState(null)
   const [timeRange, setTimeRange] = useState('today')
+  const [hiddenModels, setHiddenModels] = useState({})
 
   const toggleError = (idx) => {
     setExpandedErrors(prev => ({ ...prev, [idx]: !prev[idx] }))
@@ -1068,8 +1069,8 @@ function ErrorAnalysisPage() {
     )
   }
 
-  // 按模型错误率数据
-  const modelErrorData = Object.entries(data?.errors_by_model || {})
+  // 按模型错误率数据（全部，用于筛选 UI）
+  const allModelErrorData = Object.entries(data?.errors_by_model || {})
     .map(([model, info]) => ({
       name: model,
       errors: info.errors,
@@ -1077,6 +1078,13 @@ function ErrorAnalysisPage() {
       rate: info.rate
     }))
     .sort((a, b) => b.errors - a.errors)
+
+  // 筛选后的模型错误率数据
+  const modelErrorData = allModelErrorData.filter(m => !hiddenModels[m.name])
+
+  const toggleModel = (modelName) => {
+    setHiddenModels(prev => ({ ...prev, [modelName]: !prev[modelName] }))
+  }
 
   // 按小时错误数据（补全 24 小时）
   const hourlyErrorData = []
@@ -1121,6 +1129,11 @@ function ErrorAnalysisPage() {
       fail: info.fail,
     }))
     .sort((a, b) => a.success_rate - b.success_rate)
+
+  // 动态计算工具成功率 Y 轴范围（最低值-10 ~ 最高值+10，限制在 0-100）
+  const toolRates = toolModelChartData.map(d => d.success_rate)
+  const toolRateMin = toolRates.length > 0 ? Math.max(0, Math.floor(Math.min(...toolRates) - 10)) : 0
+  const toolRateMax = toolRates.length > 0 ? Math.min(100, Math.ceil(Math.max(...toolRates) + 10)) : 100
 
   const thStyle = { padding: '12px 8px', textAlign: 'left', fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-display)', letterSpacing: 1 }
   const thStyleRight = { ...thStyle, textAlign: 'right' }
@@ -1248,11 +1261,37 @@ function ErrorAnalysisPage() {
 
           {/* 各模型错误率对比 */}
           <div className="glass-card">
-            <h3 style={{ fontFamily: 'var(--font-display)', fontSize: 16, marginBottom: 20, color: 'var(--text-primary)' }}>
+            <h3 style={{ fontFamily: 'var(--font-display)', fontSize: 16, marginBottom: 12, color: 'var(--text-primary)' }}>
               各模型错误率对比
             </h3>
+            {/* 模型筛选器 */}
+            {allModelErrorData.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 16 }}>
+                {allModelErrorData.map(m => (
+                  <button
+                    key={m.name}
+                    onClick={() => toggleModel(m.name)}
+                    style={{
+                      padding: '3px 10px',
+                      fontSize: 11,
+                      borderRadius: 12,
+                      border: `1px solid ${hiddenModels[m.name] ? 'var(--border)' : 'rgba(99, 102, 241, 0.5)'}`,
+                      background: hiddenModels[m.name] ? 'transparent' : 'rgba(99, 102, 241, 0.15)',
+                      color: hiddenModels[m.name] ? 'var(--text-muted)' : 'var(--text-primary)',
+                      cursor: 'pointer',
+                      textDecoration: hiddenModels[m.name] ? 'line-through' : 'none',
+                      opacity: hiddenModels[m.name] ? 0.5 : 1,
+                      transition: 'all 0.2s',
+                      fontFamily: 'var(--font-display)',
+                    }}
+                  >
+                    {m.name}
+                  </button>
+                ))}
+              </div>
+            )}
             {modelErrorData.length > 0 ? (
-              <ResponsiveContainer width="100%" height={240}>
+              <ResponsiveContainer width="100%" height={Math.max(160, modelErrorData.length * 40)}>
                 <BarChart data={modelErrorData} layout="vertical">
                   <XAxis type="number" tick={{ fill: 'var(--text-muted)', fontSize: 10 }} axisLine={{ stroke: 'var(--border)' }} tickLine={false} unit="%" />
                   <YAxis type="category" dataKey="name" tick={{ fill: 'var(--text-secondary)', fontSize: 11 }} axisLine={{ stroke: 'var(--border)' }} tickLine={false} width={120} />
@@ -1268,8 +1307,8 @@ function ErrorAnalysisPage() {
                 </BarChart>
               </ResponsiveContainer>
             ) : (
-              <div style={{ height: 240, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)' }}>
-                暂无模型错误数据
+              <div style={{ height: 160, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)' }}>
+                {allModelErrorData.length > 0 ? '所有模型已被筛选隐藏' : '暂无模型错误数据'}
               </div>
             )}
           </div>
@@ -1291,7 +1330,7 @@ function ErrorAnalysisPage() {
             {toolModelChartData.length > 0 ? (
               <ResponsiveContainer width="100%" height={Math.max(200, toolModelChartData.length * 50)}>
                 <BarChart data={toolModelChartData} layout="vertical">
-                  <XAxis type="number" domain={[0, 100]} tick={{ fill: 'var(--text-muted)', fontSize: 10 }} axisLine={{ stroke: 'var(--border)' }} tickLine={false} unit="%" />
+                  <XAxis type="number" domain={[toolRateMin, toolRateMax]} tick={{ fill: 'var(--text-muted)', fontSize: 10 }} axisLine={{ stroke: 'var(--border)' }} tickLine={false} unit="%" />
                   <YAxis type="category" dataKey="name" tick={{ fill: 'var(--text-secondary)', fontSize: 11 }} axisLine={{ stroke: 'var(--border)' }} tickLine={false} width={120} />
                   <Tooltip
                     contentStyle={{ background: 'var(--bg-dark)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }}
