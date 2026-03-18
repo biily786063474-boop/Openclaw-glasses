@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, Fragment } from 'react'
 import {
   Activity,
   Users,
@@ -1640,6 +1640,9 @@ function CronJobsPage() {
   const [error, setError] = useState(null)
   const [lastUpdated, setLastUpdated] = useState(null)
   const [timeRange, setTimeRange] = useState('today')
+  const [expandedFail, setExpandedFail] = useState({})
+  const [copiedFailIdx, setCopiedFailIdx] = useState(null)
+  const [expandedCron, setExpandedCron] = useState({})
 
   const fetchData = async (range) => {
     const r = range || timeRange
@@ -1686,8 +1689,27 @@ function CronJobsPage() {
     count: data.count,
     tokens: data.tokens,
     input: data.input,
-    output: data.output
+    output: data.output,
+    failures: data.failures || 0,
+    by_model: data.by_model || {},
   })).sort((a, b) => b.tokens - a.tokens) : []
+
+  const failedTasks = cronData?.failed_tasks || []
+
+  const copyFailure = async (task, idx) => {
+    const text = [
+      `Task: ${task.cron_name}`,
+      `Agent: ${task.agent_id}`,
+      `Model: ${task.model}`,
+      `Time: ${task.timestamp}`,
+      task.error_message ? `Error: ${task.error_message}` : '',
+    ].filter(Boolean).join('\n')
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopiedFailIdx(idx)
+      setTimeout(() => setCopiedFailIdx(null), 2000)
+    } catch {}
+  }
 
   if (loading) {
     return (
@@ -1728,7 +1750,7 @@ function CronJobsPage() {
       </header>
 
       {/* Summary Cards */}
-      <section className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)', marginBottom: 40 }}>
+      <section className="stats-grid" style={{ gridTemplateColumns: 'repeat(5, 1fr)', marginBottom: 40 }}>
         <div className="glass-card stat-card">
           <div className="stat-icon messages">
             <Clock size={26} />
@@ -1736,6 +1758,16 @@ function CronJobsPage() {
           <div className="stat-info">
             <h3>{cronData?.messages || 0}</h3>
             <p>任务执行次数</p>
+          </div>
+        </div>
+
+        <div className="glass-card stat-card">
+          <div className="stat-icon" style={{ background: 'linear-gradient(135deg, rgba(239, 68, 68, 0.15), rgba(239, 68, 68, 0.05))' }}>
+            <AlertTriangle size={26} />
+          </div>
+          <div className="stat-info">
+            <h3 style={{ color: (cronData?.total_failures || 0) > 0 ? '#ef4444' : 'var(--text-primary)' }}>{cronData?.total_failures || 0}</h3>
+            <p>失败次数</p>
           </div>
         </div>
 
@@ -1783,39 +1815,76 @@ function CronJobsPage() {
                 <tr style={{ borderBottom: '1px solid var(--border)' }}>
                   <th style={{ padding: '14px 12px', textAlign: 'left', fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-display)', letterSpacing: 1 }}>任务名称</th>
                   <th style={{ padding: '14px 12px', textAlign: 'right', fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-display)', letterSpacing: 1 }}>执行次数</th>
+                  <th style={{ padding: '14px 12px', textAlign: 'right', fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-display)', letterSpacing: 1 }}>失败</th>
                   <th style={{ padding: '14px 12px', textAlign: 'right', fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-display)', letterSpacing: 1 }}>INPUT</th>
                   <th style={{ padding: '14px 12px', textAlign: 'right', fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-display)', letterSpacing: 1 }}>OUTPUT</th>
                   <th style={{ padding: '14px 12px', textAlign: 'right', fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-display)', letterSpacing: 1 }}>TOTAL TOKEN</th>
                 </tr>
               </thead>
               <tbody>
-                {cronList.map((cron, idx) => (
-                  <tr key={cron.name} style={{ borderBottom: idx < cronList.length - 1 ? '1px solid var(--border)' : 'none' }}>
-                    <td style={{ padding: '14px 12px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                        <Clock size={16} color="var(--primary-light)" />
-                        <span style={{ fontSize: 14, color: 'var(--text-primary)', fontWeight: 500 }}>{cron.name}</span>
-                      </div>
-                    </td>
-                    <td style={{ padding: '14px 12px', textAlign: 'right', fontFamily: 'var(--font-display)', fontSize: 16, fontWeight: 700, color: 'var(--text-primary)' }}>
-                      {cron.count}
-                    </td>
-                    <td style={{ padding: '14px 12px', textAlign: 'right', fontFamily: 'var(--font-display)', fontSize: 14, color: 'var(--text-secondary)' }}>
-                      {formatNumber(cron.input)}
-                    </td>
-                    <td style={{ padding: '14px 12px', textAlign: 'right', fontFamily: 'var(--font-display)', fontSize: 14, color: 'var(--text-secondary)' }}>
-                      {formatNumber(cron.output)}
-                    </td>
-                    <td style={{ padding: '14px 12px', textAlign: 'right' }}>
-                      <span style={{
-                        fontFamily: 'var(--font-display)', fontSize: 14, fontWeight: 600,
-                        color: cron.tokens > 50000 ? '#ec4899' : cron.tokens > 10000 ? '#eab308' : 'var(--text-primary)'
-                      }}>
-                        {formatNumber(cron.tokens)}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
+                {cronList.map((cron, idx) => {
+                  const models = Object.entries(cron.by_model).filter(([, s]) => s.tokens > 0).sort((a, b) => b[1].tokens - a[1].tokens)
+                  const hasModels = models.length > 0
+                  const isExpanded = expandedCron[cron.name]
+                  return (
+                    <Fragment key={cron.name}>
+                      <tr
+                        style={{ borderBottom: (!isExpanded && idx < cronList.length - 1) ? '1px solid var(--border)' : isExpanded ? 'none' : 'none', cursor: hasModels ? 'pointer' : 'default' }}
+                        onClick={() => hasModels && setExpandedCron(prev => ({ ...prev, [cron.name]: !prev[cron.name] }))}
+                      >
+                        <td style={{ padding: '14px 12px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                            {hasModels ? (isExpanded ? <ChevronDown size={16} color="var(--primary-light)" /> : <ChevronRight size={16} color="var(--primary-light)" />) : <Clock size={16} color="var(--primary-light)" />}
+                            <span style={{ fontSize: 14, color: 'var(--text-primary)', fontWeight: 500 }}>{cron.name}</span>
+                            {models.length > 1 && (
+                              <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 8, background: 'rgba(99, 102, 241, 0.15)', color: 'var(--primary-light)', fontFamily: 'var(--font-display)' }}>
+                                {models.length} models
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td style={{ padding: '14px 12px', textAlign: 'right', fontFamily: 'var(--font-display)', fontSize: 16, fontWeight: 700, color: 'var(--text-primary)' }}>
+                          {cron.count}
+                        </td>
+                        <td style={{ padding: '14px 12px', textAlign: 'right', fontFamily: 'var(--font-display)', fontSize: 14, fontWeight: 600, color: cron.failures > 0 ? '#ef4444' : 'var(--text-muted)' }}>
+                          {cron.failures > 0 ? cron.failures : '-'}
+                        </td>
+                        <td style={{ padding: '14px 12px', textAlign: 'right', fontFamily: 'var(--font-display)', fontSize: 14, color: 'var(--text-secondary)' }}>
+                          {formatNumber(cron.input)}
+                        </td>
+                        <td style={{ padding: '14px 12px', textAlign: 'right', fontFamily: 'var(--font-display)', fontSize: 14, color: 'var(--text-secondary)' }}>
+                          {formatNumber(cron.output)}
+                        </td>
+                        <td style={{ padding: '14px 12px', textAlign: 'right' }}>
+                          <span style={{
+                            fontFamily: 'var(--font-display)', fontSize: 14, fontWeight: 600,
+                            color: cron.tokens > 50000 ? '#ec4899' : cron.tokens > 10000 ? '#eab308' : 'var(--text-primary)'
+                          }}>
+                            {formatNumber(cron.tokens)}
+                          </span>
+                        </td>
+                      </tr>
+                      {isExpanded && models.map(([modelName, stats], mi) => (
+                        <tr key={modelName} style={{ borderBottom: (mi === models.length - 1 && idx < cronList.length - 1) ? '1px solid var(--border)' : mi < models.length - 1 ? '1px solid rgba(63, 63, 70, 0.2)' : 'none', background: 'rgba(99, 102, 241, 0.03)' }}>
+                          <td style={{ padding: '8px 12px 8px 48px' }}>
+                            <span style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'monospace' }}>{modelName}</span>
+                          </td>
+                          <td style={{ padding: '8px 12px', textAlign: 'right' }}></td>
+                          <td style={{ padding: '8px 12px', textAlign: 'right' }}></td>
+                          <td style={{ padding: '8px 12px', textAlign: 'right', fontFamily: 'var(--font-display)', fontSize: 12, color: 'var(--text-muted)' }}>
+                            {formatNumber(stats.input)}
+                          </td>
+                          <td style={{ padding: '8px 12px', textAlign: 'right', fontFamily: 'var(--font-display)', fontSize: 12, color: 'var(--text-muted)' }}>
+                            {formatNumber(stats.output)}
+                          </td>
+                          <td style={{ padding: '8px 12px', textAlign: 'right', fontFamily: 'var(--font-display)', fontSize: 12, color: 'var(--text-secondary)' }}>
+                            {formatNumber(stats.tokens)}
+                          </td>
+                        </tr>
+                      ))}
+                    </Fragment>
+                  )
+                })}
               </tbody>
               <tfoot>
                 <tr style={{ borderTop: '2px solid var(--border)' }}>
@@ -1824,6 +1893,9 @@ function CronJobsPage() {
                   </td>
                   <td style={{ padding: '14px 12px', textAlign: 'right', fontFamily: 'var(--font-display)', fontSize: 16, fontWeight: 700, color: 'var(--primary-light)' }}>
                     {cronData?.messages || 0}
+                  </td>
+                  <td style={{ padding: '14px 12px', textAlign: 'right', fontFamily: 'var(--font-display)', fontSize: 14, fontWeight: 600, color: (cronData?.total_failures || 0) > 0 ? '#ef4444' : 'var(--primary-light)' }}>
+                    {cronData?.total_failures || 0}
                   </td>
                   <td style={{ padding: '14px 12px', textAlign: 'right', fontFamily: 'var(--font-display)', fontSize: 14, color: 'var(--primary-light)' }}>
                     {formatNumber(cronData?.input_tokens || 0)}
@@ -1844,6 +1916,81 @@ function CronJobsPage() {
           </div>
         )}
       </section>
+
+      {/* Failed Tasks Detail */}
+      {failedTasks.length > 0 && (
+        <section style={{ marginTop: 40 }}>
+          <h2 className="section-title">
+            <AlertTriangle size={20} />
+            失败任务详情
+            <span style={{ fontSize: 13, fontWeight: 400, color: 'var(--text-muted)', marginLeft: 8 }}>
+              共 {cronData?.total_failures || failedTasks.length} 次失败
+            </span>
+          </h2>
+          <div className="glass-card" style={{ padding: 0 }}>
+            {failedTasks.map((task, idx) => (
+              <div key={idx} style={{ borderBottom: idx < failedTasks.length - 1 ? '1px solid var(--border)' : 'none' }}>
+                <div
+                  onClick={() => setExpandedFail(prev => ({ ...prev, [idx]: !prev[idx] }))}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 12, padding: '14px 16px', cursor: 'pointer',
+                    transition: 'background 0.15s',
+                    background: expandedFail[idx] ? 'rgba(239, 68, 68, 0.05)' : 'transparent',
+                  }}
+                >
+                  {expandedFail[idx] ? <ChevronDown size={16} color="var(--text-muted)" /> : <ChevronRight size={16} color="var(--text-muted)" />}
+                  <span style={{
+                    fontSize: 12, fontFamily: 'monospace', color: 'var(--text-muted)', minWidth: 150
+                  }}>
+                    {task.timestamp ? new Date(task.timestamp).toLocaleString('zh-CN') : '-'}
+                  </span>
+                  <span style={{
+                    padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600,
+                    background: 'rgba(239, 68, 68, 0.15)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)'
+                  }}>
+                    {task.cron_name}
+                  </span>
+                  <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                    {task.model}
+                  </span>
+                  <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 'auto' }}>
+                    {task.agent_id}
+                  </span>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); copyFailure(task, idx) }}
+                    style={{
+                      background: 'none', border: '1px solid var(--border)', borderRadius: 6,
+                      padding: '4px 8px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4,
+                      color: copiedFailIdx === idx ? '#22c55e' : 'var(--text-muted)', fontSize: 11, transition: 'all 0.2s'
+                    }}
+                  >
+                    {copiedFailIdx === idx ? <Check size={12} /> : <Copy size={12} />}
+                    {copiedFailIdx === idx ? '已复制' : '复制'}
+                  </button>
+                </div>
+                {expandedFail[idx] && (
+                  <div style={{ padding: '0 16px 16px 44px' }}>
+                    {task.error_message ? (
+                      <div style={{
+                        padding: '12px 16px', borderRadius: 8,
+                        background: 'rgba(239, 68, 68, 0.08)', border: '1px solid rgba(239, 68, 68, 0.2)',
+                        fontSize: 13, fontFamily: 'monospace', color: '#fca5a5',
+                        lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                      }}>
+                        {task.error_message}
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: 13, color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                        无详细错误信息
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   )
 }

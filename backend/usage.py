@@ -213,9 +213,11 @@ def get_cron_usage(hours: int = 24, today_only: bool = False) -> Dict:
         'output_tokens': 0,
         'messages': 0,
         'by_cron': {},
+        'failed_tasks': [],
     }
 
-    by_cron = defaultdict(lambda: {'count': 0, 'tokens': 0, 'input': 0, 'output': 0})
+    by_cron = defaultdict(lambda: {'count': 0, 'tokens': 0, 'input': 0, 'output': 0, 'failures': 0, 'by_model': {}})
+    failed_tasks = []
 
     # Agent IDs
     from db import load_openclaw_config
@@ -237,7 +239,9 @@ def get_cron_usage(hours: int = 24, today_only: bool = False) -> Dict:
                 messages = parse_session_file(file_path)
 
                 # 需要读取原始文件来找 cron 任务（因为需要前后消息关联）
-                prev_msg = None
+                # active_cron 持续追踪当前 cron 上下文，直到遇到下一个 user 消息才重置
+                active_cron = None  # {'name': 'task-name'} or None
+                counted_first = False  # 是否已统计过第一条 assistant（用于 count）
                 with open(file_path, 'r', encoding='utf-8') as f:
                     for line in f:
                         line = line.strip()
@@ -245,40 +249,63 @@ def get_cron_usage(hours: int = 24, today_only: bool = False) -> Dict:
                             continue
                         try:
                             data = json.loads(line)
+                            if data.get('type') == 'session':
+                                # 新 session 重置 cron 上下文
+                                active_cron = None
+                                counted_first = False
+                                continue
+
                             if data.get('type') == 'message':
                                 msg = data.get('message', {})
                                 role = msg.get('role')
 
-                                # 检查是否是 cron 用户消息
-                                is_cron = False
-                                cron_name = ''
                                 if role == 'user':
+                                    # 每个 user 消息都重置 cron 上下文
+                                    active_cron = None
+                                    counted_first = False
                                     content = msg.get('content', [])
                                     if isinstance(content, list):
                                         for c in content:
                                             if isinstance(c, dict) and c.get('type') == 'text':
                                                 text = c.get('text', '')
                                                 if '[cron:' in text:
-                                                    is_cron = True
-                                                    # 提取 cron 名称
                                                     import re
                                                     match = re.search(r'\[cron:\S+\s+(\S+)\]', text)
-                                                    if match:
-                                                        cron_name = match.group(1)
+                                                    cron_name = match.group(1) if match else 'unknown'
+                                                    active_cron = {'name': cron_name}
                                                     break
 
-                                # 如果前一条是 cron 用户消息，当前是 assistant，统计 usage
-                                if prev_msg and prev_msg.get('is_cron') and role == 'assistant':
+                                # 当前处于 cron 上下文中，assistant 消息都归入该 cron
+                                elif role == 'assistant' and active_cron:
                                     timestamp = data.get('timestamp', '')
                                     if timestamp:
                                         try:
                                             dt_utc = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
                                             dt = dt_utc.replace(tzinfo=None)
                                             if dt < cutoff_time:
-                                                prev_msg = {'is_cron': is_cron, 'cron_name': cron_name}
                                                 continue
                                         except:
                                             pass
+
+                                    cron_key = active_cron['name']
+
+                                    # 检测失败
+                                    stop_reason = msg.get('stopReason', '')
+                                    error_message = msg.get('errorMessage', '')
+                                    if stop_reason == 'error':
+                                        by_cron[cron_key]['failures'] = by_cron[cron_key].get('failures', 0) + 1
+                                        failed_tasks.append({
+                                            'cron_name': cron_key,
+                                            'agent_id': agent_id,
+                                            'timestamp': timestamp,
+                                            'model': msg.get('model', ''),
+                                            'error_message': error_message,
+                                        })
+
+                                    # 统计执行次数（每次 cron user 消息算一次，不论后续多少轮 assistant）
+                                    if not counted_first:
+                                        by_cron[cron_key]['count'] += 1
+                                        counted_first = True
 
                                     usage = msg.get('usage', {})
                                     if usage:
@@ -291,22 +318,31 @@ def get_cron_usage(hours: int = 24, today_only: bool = False) -> Dict:
                                         result['output_tokens'] += output_tok
                                         result['messages'] += 1
 
-                                        cron_key = prev_msg.get('cron_name', 'unknown')
-                                        by_cron[cron_key]['count'] += 1
                                         by_cron[cron_key]['tokens'] += total_tok
                                         by_cron[cron_key]['input'] += input_tok
                                         by_cron[cron_key]['output'] += output_tok
 
-                                prev_msg = {'is_cron': is_cron, 'cron_name': cron_name}
-                            else:
-                                prev_msg = None
+                                        # 按模型追踪 token
+                                        model_name = msg.get('model', 'unknown')
+                                        if model_name:
+                                            model_stats = by_cron[cron_key]['by_model']
+                                            if model_name not in model_stats:
+                                                model_stats[model_name] = {'input': 0, 'output': 0, 'tokens': 0}
+                                            model_stats[model_name]['input'] += input_tok
+                                            model_stats[model_name]['output'] += output_tok
+                                            model_stats[model_name]['tokens'] += total_tok
+
                         except:
-                            prev_msg = None
+                            pass
 
         except Exception as e:
             print(f"处理 cron 错误 {agent_id}: {e}")
 
     result['by_cron'] = dict(by_cron)
+    # 按时间倒序，最多 50 条
+    failed_tasks.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+    result['failed_tasks'] = failed_tasks[:50]
+    result['total_failures'] = len(failed_tasks)
     return result
 
 
