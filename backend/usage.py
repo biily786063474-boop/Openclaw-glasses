@@ -524,19 +524,29 @@ def get_error_analysis(hours: int = 24, today_only: bool = False) -> Dict:
                             continue
 
                         hour_key = dt.strftime('%H:00')
-                        is_error = stop_reason == 'error'
+                        error_msg = msg.get('errorMessage', '') if stop_reason == 'error' else ''
+
+                        # 判断是否为用量/配额不足类错误（不计入模型错误统计）
+                        is_quota_error = False
+                        if error_msg:
+                            err_lower = error_msg.lower()
+                            is_quota_error = any(kw in err_lower for kw in [
+                                'usage limit', 'rate limit', 'quota', 'too many requests',
+                                'try again in', 'exceeded', 'throttl',
+                            ])
+
+                        is_error = stop_reason == 'error' and not is_quota_error
 
                         # 按维度累计
                         errors_by_model[model]['total'] += 1
                         errors_by_hour[hour_key]['total'] += 1
                         errors_by_agent[agent_id]['total'] += 1
-                        if is_error:
-                            errors_by_model[model]['errors'] += 1
-                            errors_by_hour[hour_key]['errors'] += 1
-                            errors_by_agent[agent_id]['errors'] += 1
+                        if is_error or is_quota_error:
+                            if is_error:
+                                errors_by_model[model]['errors'] += 1
+                                errors_by_hour[hour_key]['errors'] += 1
+                                errors_by_agent[agent_id]['errors'] += 1
 
-                            # 提取错误上下文
-                            error_msg = msg.get('errorMessage', '')
                             # 从 user 文本中提取任务名
                             task_context = ''
                             cron_match = re.search(r'\[cron:\S+\s+(\S+)\]', last_user_text)
@@ -552,6 +562,7 @@ def get_error_analysis(hours: int = 24, today_only: bool = False) -> Dict:
                                 'agent_id': agent_id,
                                 'error_message': error_msg or '',
                                 'task_context': task_context,
+                                'error_type': 'quota' if is_quota_error else 'error',
                             })
 
                         # 收集 toolCall

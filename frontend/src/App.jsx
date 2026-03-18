@@ -1511,10 +1511,15 @@ function ErrorAnalysisPage() {
                     {/* Header row */}
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: hasDetail ? 'pointer' : 'default' }}
                       onClick={() => hasDetail && toggleError(idx)}>
-                      <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#ef4444', flexShrink: 0 }} />
+                      <div style={{ width: 8, height: 8, borderRadius: '50%', background: err.error_type === 'quota' ? '#eab308' : '#ef4444', flexShrink: 0 }} />
                       <span style={{ fontSize: 13, color: 'var(--text-primary)', fontWeight: 500 }}>
                         {agent.emoji || ''} {agent.name || err.agent_id}
                       </span>
+                      {err.error_type === 'quota' && (
+                        <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 8, background: 'rgba(234, 179, 8, 0.15)', color: '#eab308', border: '1px solid rgba(234, 179, 8, 0.3)', fontFamily: 'var(--font-display)' }}>
+                          用量限制
+                        </span>
+                      )}
                       <span style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-display)' }}>
                         {err.model}
                       </span>
